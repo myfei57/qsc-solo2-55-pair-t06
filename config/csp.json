@@ -30,6 +30,9 @@
       "temp_max_c": 720.0,
       "flow_min_kg_s": 42.0,
       "flow_confirm_s": 20.0,
+      "flow_startup_window_s": 10.0,
+      "flow_loaded_margin_kg_s": 10.0,
+      "flow_drop_tol_kg_s": 0.8,
       "valve_travel_pct_s": 8.0,
       "ambient_c": 22.0
     },

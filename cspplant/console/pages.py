@@ -83,6 +83,14 @@ def _receiver_page(platform: Platform) -> str:
 
     snapshot = platform.status()["receiver"]
     report = platform.temperature_report()
+    chain = platform.status()["flow_gate"]
+    phase_names = {
+        "idle": "空闲",
+        "startup": "起步（按爬升趋势）",
+        "loaded": "带负荷（按固定裕度）",
+        "confirmed": "已确认",
+        "halted": "打断·等人处理",
+    }
     rows = [
         ("状态", snapshot["state"]),
         ("出口温度 (℃)", snapshot["temperature_c"]),
@@ -94,8 +102,13 @@ def _receiver_page(platform: Platform) -> str:
         ("出力上限 (%)", snapshot["ceiling_pct"]),
         ("进口阀开度 (%)", snapshot["valve_pct"]),
         ("流量 (kg/s)", snapshot["flow_kg_s"]),
+        ("确认阶段", phase_names.get(snapshot["flow_phase"], snapshot["flow_phase"])),
         ("流量确认", "已确认" if snapshot["flow_confirmed"] else "未确认"),
-        ("确认累计 (s)", snapshot["hold_s"]),
+        ("起步窗口累计 (s)", f"{snapshot['window_s']}（净涨 {chain['net_gain_kg_s']} kg/s）"),
+        ("裕度保持累计 (s)", snapshot["hold_s"]),
+        ("裕度门限 (kg/s)", chain["loaded_threshold_kg_s"]),
+        ("退回重来 / 停下等人 / 掉点", f"{chain['resets']} / {chain['halts']} / {chain['drops']}"),
+        ("当前尝试 / 已完成确认", f"{chain['attempt']} / {chain['confirmations']}"),
         ("跳闸原因", snapshot["trip_reason"] or "-"),
     ]
     return _shell("吸热器控制台", _table("吸热器状态", rows))

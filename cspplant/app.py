@@ -20,7 +20,7 @@ from .audit.log import AuditLog
 from .audit.record import AuditRecord
 from .clock import Clock, SystemClock
 from .config import PlatformConfig, default_config
-from .errors import PlantError
+from .errors import InterlockError, PlantError
 from .eventbus import Event, EventBus
 from .field.field import FieldController
 from .field.persist import FieldPersistence
@@ -132,16 +132,33 @@ class Platform:
 
         threshold = ThresholdModel(self.config.salt)
         thermal = ThermalModel(self.config.receiver)
+        flow_gate = FlowGate(self.config.receiver)
         self.receiver = Receiver(
             self.config.receiver,
             InletValve(self.config.receiver),
-            FlowGate(self.config.receiver),
+            flow_gate,
             TemperatureSensor(self.config.receiver.ambient_c),
             thermal,
             DerateController(self.config.receiver),
             SaltHeader(self.config.salt),
             threshold,
         )
+        # 确认链的每一步都发往事件总线：审计订阅总线落盘，控制台读同一出口，
+        # 展示与落盘的字段口径必须一致。
+        def publish_flow_chain(kind: str, payload: dict) -> None:
+            flat = {key: value for key, value in payload.items() if not isinstance(value, (dict, list))}
+            self.bus.publish(
+                Event.of(
+                    "receiver",
+                    "receiver",
+                    kind,
+                    asset="receiver",
+                    severity="warning" if kind != "flow_sample" else "notice",
+                    **flat,
+                )
+            )
+
+        flow_gate.attach_sink(publish_flow_chain)
         self.salt = SaltLoop(
             self.config.salt,
             threshold,
@@ -398,6 +415,22 @@ class Platform:
             self._operations += 1
             self._persist()
             return {**report, **summary}
+
+    def resume_flow_chain(self, operator: str = "console") -> dict:
+        """人工解除确认链的"停下来等人"，退回空闲后重新确认。"""
+
+        with self._lock:
+            if not self.receiver.flow_chain_halted():
+                raise InterlockError("流量确认链不在等人状态，无需解除", component="receiver")
+            phase = self.receiver.resume_flow_chain(operator)
+            self._persist()
+            return {"resumed": True, "phase": phase, "operator": operator}
+
+    def flow_chain(self, tail: int | None = None) -> dict:
+        """返回确认链台账：控制台展示与审计核对的唯一取数口。"""
+
+        with self._lock:
+            return self.receiver.gate.chain_snapshot(tail=tail)
 
     def changeover(self) -> dict:
         """冷热罐切换：先停冷泵、再启热泵。"""
@@ -732,12 +765,7 @@ class Platform:
                 "min_ceiling_pct": round(self.receiver.derate.min_ceiling_pct(), 3),
                 "last_temperature_c": round(self.receiver.derate.last_temperature_c(), 2),
             },
-            "flow_gate": {
-                "hold_s": round(self.receiver.gate.hold_s(), 3),
-                "resets": self.receiver.gate.resets(),
-                "confirmations": self.receiver.gate.confirmations(),
-                "last_flow_kg_s": round(self.receiver.gate.last_flow(), 3),
-            },
+            "flow_gate": self.receiver.gate.chain_snapshot(tail=12),
             "thermal": {
                 "inlet_c": self.receiver.thermal.inlet_c,
                 "capacity_kj_per_k": self.receiver.thermal.capacity_kj_per_k,

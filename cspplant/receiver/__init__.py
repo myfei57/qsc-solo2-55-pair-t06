@@ -8,7 +8,20 @@
 from __future__ import annotations
 
 from .derate import DerateController, DerateState
-from .flow import FlowGate, FlowStatus
+from .flow import (
+    CONFIRMED,
+    HALTED,
+    IDLE,
+    LOADED,
+    PHASE_ORDER,
+    RETRY,
+    STARTUP,
+    WAIT_OPERATOR,
+    AttemptRecord,
+    ChainSample,
+    FlowGate,
+    FlowStatus,
+)
 from .header import SaltHeader, HeaderState
 from .receiver import AT_POWER, CIRCULATING, COLD, DERATED, TRIPPED, Receiver
 from .sensor import TemperatureSensor
@@ -22,6 +35,16 @@ __all__ = [
     "DerateState",
     "FlowGate",
     "FlowStatus",
+    "ChainSample",
+    "AttemptRecord",
+    "IDLE",
+    "STARTUP",
+    "LOADED",
+    "CONFIRMED",
+    "HALTED",
+    "PHASE_ORDER",
+    "RETRY",
+    "WAIT_OPERATOR",
     "SaltHeader",
     "HeaderState",
     "Receiver",

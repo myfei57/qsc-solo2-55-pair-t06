@@ -55,6 +55,8 @@ class Api:
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/store", self._store)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/flow-chain", self._flow_chain)
+        add("POST", "/api/flow-chain/resume", self._flow_chain_resume)
         add("GET", "/api/window", lambda params, body: {"mirrors": self._platform.mirrors_in_window()})
         add("POST", "/api/track", self._track)
         add("POST", "/api/circulate", self._circulate)
@@ -205,11 +207,20 @@ class Api:
         }
         info = {
             "receiver_state": platform.receiver.state(),
+            "flow_phase": platform.receiver.gate.phase(),
+            "flow_halted": platform.receiver.flow_chain_halted(),
             "temperature_c": round(platform.receiver.output_temperature_c(), 2),
             "net_flow_kg_s": round(platform.salt.flow_kg_s(), 3),
             "last_audit_ts": platform.audit.tail(1)[-1]["ts"] if platform.audit.tail(1) else None,
         }
         return {"ready": all(checks.values()), "checks": checks, "info": info}
+
+    def _flow_chain(self, params: dict, body: dict) -> dict:
+        tail = params.get("tail")
+        return self._platform.flow_chain(None if tail is None else int(tail))
+
+    def _flow_chain_resume(self, params: dict, body: dict) -> dict:
+        return self._platform.resume_flow_chain(str(body.get("operator", "console")))
 
     # ---- 动作 ---------------------------------------------------------
 

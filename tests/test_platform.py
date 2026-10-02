@@ -127,3 +127,66 @@ def test_note_error_writes_audit_entry(platform):
     record = platform.note_error(InterlockError("联锁拒绝", component="receiver"))
     assert record["component"] == "receiver"
     assert platform.audit.summary()["by_severity"]["warning"] == 1
+
+
+def test_flow_chain_confirms_after_real_pump_ramp_and_audits_every_step(platform):
+    platform.start()
+    platform.track(800.0, 720.0)
+    report = platform.circulate()
+    assert report["ok"] is True
+    chain = platform.flow_chain()
+    # 阶段严格按 idle→startup→loaded→confirmed 走，台账与落盘审计同源。
+    confirmed = next(a for a in chain["attempts"] if a["result"] == "confirmed")
+    assert confirmed["phases"] == ["startup", "loaded", "confirmed"]
+    on_disk = platform.audit.journal.read_all()
+    samples_on_disk = sum(1 for r in on_disk if r["action"] == "flow_sample")
+    assert samples_on_disk == len(chain["samples"])
+    actions = {r["action"] for r in on_disk}
+    assert {"flow_phase_entered", "flow_confirmed"} <= actions
+
+
+def test_sensor_drop_in_startup_retries_automatically(platform):
+    platform.start()
+    platform.track(800.0, 720.0)
+    platform.salt.start_cold()
+    gate = platform.receiver.gate
+    while gate.phase() != "startup":
+        platform.salt.step(1.0)
+        platform.receiver.verify_flow(platform.salt.flow_kg_s(), 1.0)
+    status = platform.receiver.verify_flow(None, 1.0)
+    assert status.resolution == "retry"
+    assert gate.phase() == "idle"
+    assert gate.resets() == 1
+    # 掉点步不能算过：台账里 valid=False 且该尝试归档为 retried。
+    chain = platform.flow_chain()
+    assert any(not s["valid"] for s in chain["samples"])
+    assert chain["attempts"][-1]["result"] == "retried"
+    # 不需要人工，泵继续爬即可完成确认。
+    while not platform.receiver.flow_confirmed():
+        platform.salt.step(1.0)
+        platform.receiver.verify_flow(platform.salt.flow_kg_s(), 1.0)
+    assert platform.receiver.admit() == "admitted"
+
+
+def test_sensor_drop_under_load_halts_and_requires_manual_resume(platform):
+    from cspplant.console.api import Api
+
+    platform.start()
+    platform.track(800.0, 720.0)
+    platform.salt.start_cold()
+    gate = platform.receiver.gate
+    while gate.phase() != "loaded":
+        platform.salt.step(1.0)
+        platform.receiver.verify_flow(platform.salt.flow_kg_s(), 1.0)
+    status = platform.receiver.verify_flow(platform.salt.flow_kg_s(), 1.0, valid=False)
+    assert status.resolution == "wait_operator"
+    assert gate.halted() is True
+    # 确认被打断绝不能通盐。
+    assert platform.receiver.flow_confirmed() is False
+    # 控制台能看到台账，解除动作也有审计。
+    api = Api(platform)
+    code, body = api.handle("GET", "/api/flow-chain", {}, {})
+    assert code == 200 and body["halted"] is True
+    code, body = api.handle("POST", "/api/flow-chain/resume", {}, {"operator": "shift-lead"})
+    assert code == 200 and body["phase"] == "idle"
+    assert platform.audit.count("flow_confirm_resume") == 1

@@ -115,5 +115,10 @@ def test_salt_levels_persist_across_restart(platform, clock):
     hot_pct = platform.salt.hot_tank.level_pct()
 
     restarted = build_plant(default_config(), clock=clock, storage_root=platform.store.root)
-    assert restarted.salt.cold_tank.level_pct() == pytest.approx(cold_pct, abs=1e-6)
-    assert restarted.salt.hot_tank.level_pct() == pytest.approx(hot_pct, abs=1e-6)
+    saved = platform.salt._persistence.read_levels()
+    # 重启只可能恢复到最后一次落盘（按 4 位小数）的液位，不能拿运行内存值要求零误差。
+    assert restarted.salt.cold_tank.level_pct() == pytest.approx(saved["cold_pct"], abs=1e-9)
+    assert restarted.salt.hot_tank.level_pct() == pytest.approx(saved["hot_pct"], abs=1e-9)
+    # 落盘颗粒度只有 1e-4%，内存值与恢复值之间的差也只能来自这次四舍五入。
+    assert abs(restarted.salt.cold_tank.level_pct() - cold_pct) <= 1e-4
+    assert abs(restarted.salt.hot_tank.level_pct() - hot_pct) <= 1e-4

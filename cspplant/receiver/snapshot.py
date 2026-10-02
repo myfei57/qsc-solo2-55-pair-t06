@@ -15,7 +15,10 @@ class ReceiverSnapshot:
     valve_pct: float
     flow_kg_s: float
     flow_confirmed: bool
+    flow_phase: str
+    flow_halted: bool
     hold_s: float
+    window_s: float
     derated: bool
     ceiling_pct: float
     trip_reason: str
@@ -28,7 +31,10 @@ class ReceiverSnapshot:
             "valve_pct": round(self.valve_pct, 2),
             "flow_kg_s": round(self.flow_kg_s, 3),
             "flow_confirmed": self.flow_confirmed,
+            "flow_phase": self.flow_phase,
+            "flow_halted": self.flow_halted,
             "hold_s": round(self.hold_s, 3),
+            "window_s": round(self.window_s, 3),
             "derated": self.derated,
             "ceiling_pct": round(self.ceiling_pct, 3),
             "trip_reason": self.trip_reason,

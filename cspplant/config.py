@@ -130,13 +130,22 @@ class FieldLimits:
 
 @dataclass(frozen=True)
 class ReceiverLimits:
-    """吸热器温度带、流量门控与阀门速度约束。"""
+    """吸热器温度带、流量门控与阀门速度约束。
+
+    流量确认按工况分两段判据（判据定死，不可在运行时切换）：泵刚起步时按
+    ``flow_startup_window_s`` 窗口内的爬升趋势确认，带负荷后按
+    ``flow_loaded_margin_kg_s`` 的固定裕度确认并持续 ``flow_confirm_s`` 秒。
+    窗口时长是起步阶段判趋势用的，裕度时长是带负荷阶段判裕度用的，两者不通用。
+    """
 
     temp_target_c: float
     temp_derate_c: float
     temp_max_c: float
     flow_min_kg_s: float
     flow_confirm_s: float
+    flow_startup_window_s: float
+    flow_loaded_margin_kg_s: float
+    flow_drop_tol_kg_s: float
     valve_travel_pct_s: float
     ambient_c: float
 
@@ -148,11 +157,16 @@ class ReceiverLimits:
             temp_max_c=_number(section, "temp_max_c", minimum=1.0),
             flow_min_kg_s=_number(section, "flow_min_kg_s", minimum=0.1),
             flow_confirm_s=_number(section, "flow_confirm_s", minimum=0.1),
+            flow_startup_window_s=_number(section, "flow_startup_window_s", minimum=1.0),
+            flow_loaded_margin_kg_s=_number(section, "flow_loaded_margin_kg_s", minimum=0.0),
+            flow_drop_tol_kg_s=_number(section, "flow_drop_tol_kg_s", minimum=0.0),
             valve_travel_pct_s=_number(section, "valve_travel_pct_s", minimum=0.1),
             ambient_c=_number(section, "ambient_c"),
         )
         if not limits.temp_target_c < limits.temp_derate_c < limits.temp_max_c:
             raise ConfigError("吸热器温度带必须满足 目标 < 降额 < 上限", component="config")
+        if limits.flow_loaded_margin_kg_s <= 0.0:
+            raise ConfigError("带负荷确认裕度必须为正，否则两阶段判据重合", component="config")
         return limits
 
     def confirmed(self, temperature_c: float) -> bool:
@@ -175,6 +189,11 @@ class ReceiverLimits:
         """流量是否达到低流量联锁门限。"""
 
         return float(flow_kg_s) >= self.flow_min_kg_s
+
+    def flow_loaded_threshold(self) -> float:
+        """带负荷阶段的固定裕度门限（联锁门限 + 裕度）。"""
+
+        return self.flow_min_kg_s + self.flow_loaded_margin_kg_s
 
 
 @dataclass(frozen=True)
@@ -346,7 +365,7 @@ def default_config() -> PlatformConfig:
         heliostat=HeliostatLimits(0.6, 1.2, 0.9, 12.0, 450.0, 0.94),
         irradiance=IrradianceLimits(250.0, 1100.0, 30.0, 180.0),
         field=FieldLimits(320.0, 6.0, 12, 6.0),
-        receiver=ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 8.0, 22.0),
+        receiver=ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 10.0, 10.0, 0.8, 8.0, 22.0),
         salt=SaltLimits(18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4),
         steam=SteamLimits(12.0, 0.8, 6.0, 30.0, 1.0),
         wash=WashLimits(90.0, 26.0, 4.0, 9.0),
@@ -386,6 +405,9 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "temp_max_c": cfg.receiver.temp_max_c,
                 "flow_min_kg_s": cfg.receiver.flow_min_kg_s,
                 "flow_confirm_s": cfg.receiver.flow_confirm_s,
+                "flow_startup_window_s": cfg.receiver.flow_startup_window_s,
+                "flow_loaded_margin_kg_s": cfg.receiver.flow_loaded_margin_kg_s,
+                "flow_drop_tol_kg_s": cfg.receiver.flow_drop_tol_kg_s,
                 "valve_travel_pct_s": cfg.receiver.valve_travel_pct_s,
                 "ambient_c": cfg.receiver.ambient_c,
             },

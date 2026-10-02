@@ -91,10 +91,16 @@ class Receiver:
 
         return self._state
 
-    def verify_flow(self, flow_kg_s: float, dt: float) -> FlowStatus:
-        """推进流量确认门控，返回本次判定结果。"""
+    def verify_flow(
+        self, flow_kg_s: float | None, dt: float, *, valid: bool = True
+    ) -> FlowStatus:
+        """推进流量确认链，返回本次判定结果。
 
-        status = self._gate.update(flow_kg_s, dt)
+        ``valid=False``（或流量给 ``None``）表示传感器掉点：确认链按部分
+        失败处理，绝不在掉点时给出确认。
+        """
+
+        status = self._gate.update(flow_kg_s, dt, valid=valid)
         self._last_flow = status
         if status.confirmed and self._state == COLD:
             self._state = CIRCULATING
@@ -107,11 +113,26 @@ class Receiver:
 
         return self._gate.confirmed()
 
+    def flow_chain_halted(self) -> bool:
+        """确认链是否停在"等人处理"。"""
+
+        return self._gate.halted()
+
+    def resume_flow_chain(self, operator: str = "operator") -> str:
+        """人工解除确认链的"停下来等人"，退回空闲重新确认。"""
+
+        return self._gate.resume(operator)
+
     def admit(self) -> str:
         """通盐：以流量确认为前提把熔盐放进吸热器。"""
 
         if self._state == TRIPPED:
             raise InterlockError("吸热器已跳闸，未复位前禁止通盐", component="receiver")
+        if self._gate.halted():
+            raise InterlockError(
+                "流量确认中途停在等人处理，必须人工解除后重新确认，禁止通盐",
+                component="receiver",
+            )
         if not self._gate.confirmed():
             raise InterlockError("流量未确认，禁止通盐", component="receiver")
         state = self._header.admit(True)
@@ -199,6 +220,7 @@ class Receiver:
             raise InterlockError("故障闩锁未复位，禁止复位吸热器", component="receiver")
         self._thermal.reset()
         self._sensor.reset(self._limits.ambient_c)
+        self._gate.reset()
         self._trip_reason = ""
         self._state = COLD
         return self._state
@@ -232,9 +254,12 @@ class Receiver:
             temperature_c=self._sensor.value_c(),
             peak_c=self._sensor.peak_c(),
             valve_pct=self._valve.position_pct(),
-            flow_kg_s=0.0 if flow is None else flow.flow_kg_s,
+            flow_kg_s=0.0 if flow is None or flow.flow_kg_s is None else flow.flow_kg_s,
             flow_confirmed=self._gate.confirmed(),
+            flow_phase=self._gate.phase(),
+            flow_halted=self._gate.halted(),
             hold_s=self._gate.hold_s(),
+            window_s=self._gate.window_s(),
             derated=self._derate.active(),
             ceiling_pct=self._derate.ceiling_pct(self._sensor.value_c()),
             trip_reason=self._trip_reason,
