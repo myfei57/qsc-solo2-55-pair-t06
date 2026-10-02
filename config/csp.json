@@ -33,6 +33,20 @@
       "valve_travel_pct_s": 8.0,
       "ambient_c": 22.0
     },
+    "flow_confirm": {
+      "ramp_window_s": 10.0,
+      "ramp_min_slope_kg_s2": 0.8,
+      "ramp_min_r2": 0.9,
+      "ramp_min_end_kg_s": 30.0,
+      "loaded_margin_kg_s": 6.0,
+      "loaded_hold_s": 20.0,
+      "loaded_slope_bound_kg_s2": 0.25,
+      "startup_dwell_s": 2.0,
+      "loaded_dwell_s": 2.0,
+      "sensor_fault_streak": 5,
+      "tick_gap_multiplier": 2.0,
+      "gate_max_retries": 3
+    },
     "salt": {
       "cold_level_min_pct": 18.0,
       "hot_level_max_pct": 96.0,

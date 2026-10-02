@@ -20,6 +20,17 @@ from .audit.log import AuditLog
 from .audit.record import AuditRecord
 from .clock import Clock, SystemClock
 from .config import PlatformConfig, default_config
+from .confirm import (
+    EVT_CHAIN_ABORTED,
+    EVT_CHAIN_HELD,
+    EVT_CHAIN_RESUMED,
+    EVT_FLOW_PERMITTED,
+    EVT_GATE_BACKTRACK,
+    EVT_GATE_RETRY,
+    EVT_OPERATOR_PAUSE,
+    EVT_SKIP_DENIED,
+)
+from .confirm.chain import ConfirmChain, replay_chain
 from .errors import PlantError
 from .eventbus import Event, EventBus
 from .field.field import FieldController
@@ -149,6 +160,8 @@ class Platform:
             self.receiver.header,
             SaltPersistence(store),
         )
+
+        self.confirm = ConfirmChain(self.config.flow_confirm, sink=self._on_confirm_event)
 
         bypass = BypassValve(self.config.steam)
         ramp = LoadRamp(self.config.steam)
@@ -359,6 +372,7 @@ class Platform:
                 dni_w_m2,
                 self.clock.now(),
                 load_mw,
+                confirm=self.confirm,
             )
             summary = self._record_operation(op_id, "startup", report)
             self._operations += 1
@@ -393,11 +407,130 @@ class Platform:
 
         with self._lock:
             op_id = self.ids.next()
-            report = circulate(self.salt, self.receiver, 1.0, target_flow_kg_s)
+            report = circulate(self.salt, self.receiver, 1.0, target_flow_kg_s, confirm=self.confirm)
             summary = self._record_operation(op_id, "circulate", report)
             self._operations += 1
             self._persist()
             return {**report, **summary}
+
+    # ---- 通盐确认链 ---------------------------------------------------
+
+    _CONFIRM_SEVERITY = {
+        EVT_GATE_RETRY: "warning",
+        EVT_GATE_BACKTRACK: "warning",
+        EVT_OPERATOR_PAUSE: "warning",
+        EVT_CHAIN_HELD: "warning",
+        EVT_CHAIN_ABORTED: "alarm",
+        EVT_SKIP_DENIED: "alarm",
+    }
+    _CONFIRM_MESSAGES = {
+        EVT_GATE_RETRY: "起步确认被打断，作废累计原地重试",
+        EVT_GATE_BACKTRACK: "带负荷确认被打断，退回待命门重来",
+        EVT_CHAIN_HELD: "确认链部分失败，已停下等人",
+        EVT_CHAIN_ABORTED: "确认链终止",
+        EVT_CHAIN_RESUMED: "确认链人工恢复",
+        EVT_FLOW_PERMITTED: "流量确认通过，允许通盐",
+        EVT_SKIP_DENIED: "跳步请求被拒绝",
+        EVT_OPERATOR_PAUSE: "确认链人工暂停",
+    }
+
+    def _on_confirm_event(self, event: dict) -> None:
+        """确认链事件唯一出口：原样投总线，由审计落成流水。
+
+        完整事件（序号/动作/数据/哈希）放在 ``data`` 里随审计落盘，复盘时可逐字段
+        重放；控制台与审计都只读这份事件，不留第二份口径。
+        """
+
+        action = event["action"]
+        self.bus.publish(
+            Event.of(
+                "confirm",
+                "confirm",
+                action,
+                severity=self._CONFIRM_SEVERITY.get(action, "notice"),
+                message=self._CONFIRM_MESSAGES.get(action, ""),
+                seq=event["seq"],
+                event_ts=event["ts"],
+                hash=event["hash"],
+                data=event["data"],
+            )
+        )
+
+    def confirm_start(self) -> dict:
+        """开始一轮通盐前流量确认。"""
+
+        with self._lock:
+            return self.confirm.start(self.clock.now())
+
+    def confirm_tick(
+        self,
+        flow_kg_s: float | None = None,
+        valid: bool = True,
+        pump_running: bool = True,
+        interlock_ok: bool = True,
+    ) -> dict:
+        """把当前现场样本喂给确认链（dt 取真实步长，平台演示/联调用）。"""
+
+        with self._lock:
+            if flow_kg_s is None:
+                flow_kg_s = self.salt.flow_kg_s()
+                pump_running = self.salt.pumps_running() > 0
+            return self.confirm.tick(
+                self.clock.now(), flow_kg_s, valid, pump_running, interlock_ok
+            )
+
+    def confirm_pause(self, operator: str = "console", reason: str = "operator_pause") -> dict:
+        with self._lock:
+            return self.confirm.pause(self.clock.now(), operator, reason)
+
+    def confirm_resume(self, operator: str = "console") -> dict:
+        with self._lock:
+            return self.confirm.resume(self.clock.now(), operator)
+
+    def confirm_abort(self, operator: str = "console", reason: str = "operator_abort") -> dict:
+        with self._lock:
+            return self.confirm.abort(self.clock.now(), operator, reason)
+
+    def confirm_skip(self, gate: str | None = None, operator: str = "console") -> dict:
+        with self._lock:
+            return self.confirm.request_skip(gate, self.clock.now(), operator)
+
+    def confirm_view(self) -> dict:
+        """确认链控制台视图（现场链从同一事件流水投影）。"""
+
+        with self._lock:
+            return self.confirm.view()
+
+    def confirm_events(self) -> list[dict]:
+        with self._lock:
+            return self.confirm.events()
+
+    def confirm_replay(self) -> dict:
+        """从落盘审计事件重放确认链，与现场视图逐字段对账，返回比对结果。"""
+
+        with self._lock:
+            recorded = [
+                {
+                    "seq": entry.payload["seq"],
+                    "action": entry.action,
+                    "ts": entry.payload.get("event_ts", entry.ts),
+                    "hash": entry.payload["hash"],
+                    "data": entry.payload["data"],
+                }
+                for entry in self.audit.records(limit=100_000)
+                if entry.component == "confirm" and "data" in entry.payload and "hash" in entry.payload
+            ]
+            replayed = replay_chain(self.config.flow_confirm, recorded)
+            live = self.confirm.view()
+            replay_view = replayed.view()
+            same = live == replay_view
+            return {
+                "same": same,
+                "events": len(recorded),
+                "ledger_ok": replayed.verify()["ok"],
+                "replay": replay_view,
+                "live": live,
+            }
 
     def changeover(self) -> dict:
         """冷热罐切换：先停冷泵、再启热泵。"""
@@ -565,6 +698,15 @@ class Platform:
             self._cycles += 1
             moment = self.clock.now()
             salt_report = self.salt.step(dt)
+            # 确认链在执行中时，每个控制周期把现场样本喂给它；空闲/保持/终态不喂。
+            if self.confirm.status == "running":
+                self.confirm.tick(
+                    self.clock.now(),
+                    self.salt.flow_kg_s(),
+                    True,
+                    self.salt.pumps_running() > 0,
+                    True,
+                )
             power_kw = self.field.thermal_power_kw()
             dispatch_pct = self.field.step_dispatch(dt)
             if self.receiver.header.state() == "admitted":
@@ -738,6 +880,7 @@ class Platform:
                 "confirmations": self.receiver.gate.confirmations(),
                 "last_flow_kg_s": round(self.receiver.gate.last_flow(), 3),
             },
+            "flow_confirm": self.confirm.view(),
             "thermal": {
                 "inlet_c": self.receiver.thermal.inlet_c,
                 "capacity_kj_per_k": self.receiver.thermal.capacity_kj_per_k,

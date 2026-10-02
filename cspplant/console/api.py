@@ -53,6 +53,15 @@ class Api:
         add("GET", "/api/alarms", self._alarms)
         add("GET", "/api/timeline", self._timeline)
         add("GET", "/api/journal", self._journal)
+        add("GET", "/api/confirm", self._confirm_view)
+        add("GET", "/api/confirm/events", self._confirm_events)
+        add("GET", "/api/confirm/replay", self._confirm_replay)
+        add("POST", "/api/confirm/start", lambda params, body: self._platform.confirm_start())
+        add("POST", "/api/confirm/tick", self._confirm_tick)
+        add("POST", "/api/confirm/pause", self._confirm_pause)
+        add("POST", "/api/confirm/resume", self._confirm_resume)
+        add("POST", "/api/confirm/abort", self._confirm_abort)
+        add("POST", "/api/confirm/skip", self._confirm_skip)
         add("GET", "/api/store", self._store)
         add("GET", "/api/readiness", self._readiness)
         add("GET", "/api/window", lambda params, body: {"mirrors": self._platform.mirrors_in_window()})
@@ -200,6 +209,7 @@ class Api:
         checks = {
             "irradiance_durable": platform.field.durable_ready(platform.clock.now()),
             "flow_confirmed": platform.receiver.flow_confirmed(),
+            "flow_confirm_permitted": platform.confirm.permitted(),
             "header_admitted": platform.receiver.header.state() == "admitted",
             "latch_clear": not platform.latch.latched(),
         }
@@ -207,6 +217,8 @@ class Api:
             "receiver_state": platform.receiver.state(),
             "temperature_c": round(platform.receiver.output_temperature_c(), 2),
             "net_flow_kg_s": round(platform.salt.flow_kg_s(), 3),
+            "confirm_status": platform.confirm.status,
+            "confirm_gate": platform.confirm.current_gate,
             "last_audit_ts": platform.audit.tail(1)[-1]["ts"] if platform.audit.tail(1) else None,
         }
         return {"ready": all(checks.values()), "checks": checks, "info": info}
@@ -276,3 +288,40 @@ class Api:
         if kind == "salt":
             return self._platform.disturb_salt(_as_float(body, "value", 0.2))
         return self._platform.disturb_steam(_as_float(body, "value", 0.0))
+
+    # ---- 通盐确认链 ---------------------------------------------------
+
+    def _confirm_view(self, params: dict, body: dict) -> dict:
+        return self._platform.confirm_view()
+
+    def _confirm_events(self, params: dict, body: dict) -> dict:
+        return {"events": self._platform.confirm_events()}
+
+    def _confirm_replay(self, params: dict, body: dict) -> dict:
+        return self._platform.confirm_replay()
+
+    def _confirm_tick(self, params: dict, body: dict) -> dict:
+        flow = body.get("flow_kg_s")
+        return self._platform.confirm_tick(
+            None if flow is None else float(flow),
+            valid=bool(body.get("valid", True)),
+            pump_running=bool(body.get("pump_running", True)),
+            interlock_ok=bool(body.get("interlock_ok", True)),
+        )
+
+    def _confirm_pause(self, params: dict, body: dict) -> dict:
+        return self._platform.confirm_pause(
+            str(body.get("operator", "console")), str(body.get("reason", "operator_pause"))
+        )
+
+    def _confirm_resume(self, params: dict, body: dict) -> dict:
+        return self._platform.confirm_resume(str(body.get("operator", "console")))
+
+    def _confirm_abort(self, params: dict, body: dict) -> dict:
+        return self._platform.confirm_abort(
+            str(body.get("operator", "console")), str(body.get("reason", "operator_abort"))
+        )
+
+    def _confirm_skip(self, params: dict, body: dict) -> dict:
+        gate = body.get("gate")
+        return self._platform.confirm_skip(None if gate is None else str(gate), str(body.get("operator", "console")))

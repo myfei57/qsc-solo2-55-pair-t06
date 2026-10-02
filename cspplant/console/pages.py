@@ -11,7 +11,23 @@ from html import escape
 
 from ..app import Platform
 
-PAGE_PATHS: tuple[str, ...] = ("/", "/receiver", "/salt", "/alarms")
+PAGE_PATHS: tuple[str, ...] = ("/", "/receiver", "/salt", "/confirm", "/alarms")
+
+_STATUS_TEXT = {
+    "idle": "空闲",
+    "running": "确认中",
+    "held": "保持等人",
+    "aborted": "已终止",
+    "confirmed": "已确认放行",
+}
+_GATE_TEXT = {
+    "g0_precheck": "G0 前置条件",
+    "g1_startup_ramp": "G1 起步爬升趋势",
+    "g2_arm_loaded": "G2 工况锁定待命",
+    "g3_loaded_margin": "G3 带负荷固定裕度",
+    "g4_salt_permit": "G4 通盐许可",
+}
+_GATE_STATE_TEXT = {"waiting": "未进入", "active": "判定中", "passed": "已通过", "blocked": "被打断"}
 
 _STYLE = """
 body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; background: #0f1720; color: #e6edf3; }
@@ -45,6 +61,7 @@ def _shell(title: str, body: str) -> str:
             ("/", "镜场"),
             ("/receiver", "吸热器"),
             ("/salt", "熔盐"),
+            ("/confirm", "通盐确认"),
             ("/alarms", "告警"),
         )
     )
@@ -147,10 +164,80 @@ def _alarm_page(platform: Platform) -> str:
     return _shell("告警控制台", body)
 
 
+def _confirm_page(platform: Platform) -> str:
+    """通盐确认页：确认链状态、各门判据、最近一拍证据与打断记录。"""
+
+    view = platform.status()["flow_confirm"]
+    status_text = _STATUS_TEXT.get(view["status"], view["status"])
+    permit = "已放行" if view["permitted"] else "未放行"
+    rows = [
+        ("链状态", status_text),
+        ("当前门", _GATE_TEXT.get(view["current_gate"] or "-", view["current_gate"] or "-")),
+        ("工况", "带负荷" if view["regime"] == "loaded" else ("起步" if view["regime"] == "startup" else "-")),
+        ("通盐许可", permit),
+        ("配置摘要", view["config_hash"] or "-"),
+        ("已处理拍数", view["ticks"]),
+    ]
+    body = _table("确认链", rows)
+
+    gate_rows: list[tuple[str, object]] = []
+    for gate_id in (
+        "g0_precheck",
+        "g1_startup_ramp",
+        "g2_arm_loaded",
+        "g3_loaded_margin",
+        "g4_salt_permit",
+    ):
+        gate = view["gates"][gate_id]
+        gate_rows.append(
+            (
+                _GATE_TEXT[gate_id],
+                f"{_GATE_STATE_TEXT.get(gate['state'], gate['state'])}｜判据 {gate['criterion'] or '-'}｜第 "
+                f"{gate['attempt']} 次尝试",
+            )
+        )
+    body += _table("各门（严格时序，不可跳）", gate_rows)
+
+    last = view["last_tick"]
+    if last is not None:
+        evidence = last.get("evidence") or {}
+        tick_rows: list[tuple[str, object]] = [
+            ("门", _GATE_TEXT.get(last.get("gate") or "-", last.get("gate") or "-")),
+            ("流量 (kg/s)", last.get("flow_kg_s")),
+            ("采样有效", "是" if last.get("valid") else "否（掉点，不算通过）"),
+            ("泵在运", "是" if last.get("pump_running") else "否"),
+            ("联锁正常", "是" if last.get("interlock_ok") else "否"),
+            ("判定", last.get("verdict")),
+            ("原因", last.get("reason")),
+        ]
+        for key, label in (
+            ("slope_kg_s2", "拟合斜率 (kg/s²)"),
+            ("r2", "拟合度 R²"),
+            ("threshold_kg_s", "固定裕度门限 (kg/s)"),
+            ("min_headroom_kg_s", "门限上最小余量 (kg/s)"),
+            ("window_s", "保持窗口 (s)"),
+        ):
+            if isinstance(evidence, dict) and key in evidence:
+                tick_rows.append((label, evidence[key]))
+        body += _table("最近一拍证据", tick_rows)
+
+    interrupts = view["interrupts"][-8:]
+    int_rows = [
+        (
+            f"{item['ts']} {_GATE_TEXT.get(item['gate'], item['gate'])}",
+            f"{item['reason']} → {item['action']}（{item['resolved'] or '待处置'}）",
+        )
+        for item in reversed(interrupts)
+    ] or [("暂无", "-")]
+    body += _table("打断记录（退/停按阶段策略表）", int_rows)
+    return _shell("通盐确认控制台", body)
+
+
 _RENDERERS = {
     "/": _mirror_page,
     "/receiver": _receiver_page,
     "/salt": _salt_page,
+    "/confirm": _confirm_page,
     "/alarms": _alarm_page,
 }
 

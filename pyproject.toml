@@ -19,6 +19,7 @@ packages = [
     "cspplant.heliostat",
     "cspplant.field",
     "cspplant.receiver",
+    "cspplant.confirm",
     "cspplant.salt",
     "cspplant.steam",
     "cspplant.temp",

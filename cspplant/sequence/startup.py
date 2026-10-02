@@ -29,6 +29,7 @@ def startup_plant(
     now: float,
     load_mw: float,
     dt: float = 1.0,
+    confirm=None,
 ) -> dict:
     """把整条控制链从冷态带到带负荷。"""
 
@@ -41,7 +42,7 @@ def startup_plant(
     if not tracking["ok"]:
         return {"ok": False, "steps": steps, "violations": violations, "stage": "tracking"}
 
-    circulation = circulate(salt, receiver, dt)
+    circulation = circulate(salt, receiver, dt, confirm=confirm)
     steps.extend(circulation["steps"])
     violations.extend(circulation["violations"])
     if not circulation["ok"]:

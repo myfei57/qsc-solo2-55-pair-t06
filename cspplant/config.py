@@ -178,6 +178,59 @@ class ReceiverLimits:
 
 
 @dataclass(frozen=True)
+class FlowConfirmLimits:
+    """通盐前流量确认链的工况判定与中断策略约束。
+
+    确认链不再用一条「连续够量 20 秒」通吃全程：起步阶段看爬升趋势（线性拟合
+    斜率与拟合度），带负荷阶段看固定裕度（联锁门限之上再留余量、且流量已走平）。
+    工况切换带迟滞停留，传感器单点掉点按部分失败处理，每道门允许自动重试的次数
+    也在这里封顶。所有取值在装配阶段定死，确认链运行期不允许临时改判据。
+    """
+
+    flow_min_kg_s: float
+    ramp_window_s: float
+    ramp_min_slope_kg_s2: float
+    ramp_min_r2: float
+    ramp_min_end_kg_s: float
+    loaded_margin_kg_s: float
+    loaded_hold_s: float
+    loaded_slope_bound_kg_s2: float
+    startup_dwell_s: float
+    loaded_dwell_s: float
+    sensor_fault_streak: int
+    tick_gap_multiplier: float
+    gate_max_retries: int
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any], flow_min_kg_s: float) -> "FlowConfirmLimits":
+        limits = cls(
+            flow_min_kg_s=float(flow_min_kg_s),
+            ramp_window_s=_number(section, "ramp_window_s", minimum=1.0),
+            ramp_min_slope_kg_s2=_number(section, "ramp_min_slope_kg_s2", minimum=0.01),
+            ramp_min_r2=_number(section, "ramp_min_r2", minimum=0.0),
+            ramp_min_end_kg_s=_number(section, "ramp_min_end_kg_s", minimum=0.0),
+            loaded_margin_kg_s=_number(section, "loaded_margin_kg_s", minimum=0.0),
+            loaded_hold_s=_number(section, "loaded_hold_s", minimum=0.1),
+            loaded_slope_bound_kg_s2=_number(section, "loaded_slope_bound_kg_s2", minimum=0.0),
+            startup_dwell_s=_number(section, "startup_dwell_s", minimum=0.0),
+            loaded_dwell_s=_number(section, "loaded_dwell_s", minimum=0.0),
+            sensor_fault_streak=_integer(section, "sensor_fault_streak", minimum=1),
+            tick_gap_multiplier=_number(section, "tick_gap_multiplier", minimum=1.0),
+            gate_max_retries=_integer(section, "gate_max_retries", minimum=0),
+        )
+        if limits.ramp_min_r2 > 1.0:
+            raise ConfigError("爬升拟合度不得超过 1", component="config")
+        if limits.ramp_min_end_kg_s >= limits.flow_min_kg_s:
+            raise ConfigError("起步窗口末端流量必须仍低于联锁门限，起步门不得按带负荷口径放行", component="config")
+        return limits
+
+    def loaded_threshold_kg_s(self) -> float:
+        """带负荷确认门限：联锁门限之上再留固定裕度。"""
+
+        return self.flow_min_kg_s + self.loaded_margin_kg_s
+
+
+@dataclass(frozen=True)
 class SaltLimits:
     """熔盐液位、泵升速与母管压力约束。"""
 
@@ -295,6 +348,7 @@ class PlatformConfig:
     irradiance: IrradianceLimits
     field: FieldLimits
     receiver: ReceiverLimits
+    flow_confirm: FlowConfirmLimits
     salt: SaltLimits
     steam: SteamLimits
     wash: WashLimits
@@ -311,13 +365,20 @@ class PlatformConfig:
             raise ConfigError("platform.storage_root 必须是非空字符串", component="config")
 
         limits = _section(mapping, "limits")
+        receiver = ReceiverLimits.from_mapping(_section(limits, "receiver"))
+        flow_confirm_section = limits.get("flow_confirm", {})
+        if flow_confirm_section is None:
+            flow_confirm_section = {}
+        if not isinstance(flow_confirm_section, Mapping):
+            raise ConfigError("配置段落 'flow_confirm' 必须是映射", component="config")
         return cls(
             name=name,
             storage_root=storage_root,
             heliostat=HeliostatLimits.from_mapping(_section(limits, "heliostat")),
             irradiance=IrradianceLimits.from_mapping(_section(limits, "irradiance")),
             field=FieldLimits.from_mapping(_section(limits, "field")),
-            receiver=ReceiverLimits.from_mapping(_section(limits, "receiver")),
+            receiver=receiver,
+            flow_confirm=FlowConfirmLimits.from_mapping(flow_confirm_section, receiver.flow_min_kg_s),
             salt=SaltLimits.from_mapping(_section(limits, "salt")),
             steam=SteamLimits.from_mapping(_section(limits, "steam")),
             wash=WashLimits.from_mapping(_section(limits, "wash")),
@@ -340,13 +401,29 @@ def load_config(path: str) -> PlatformConfig:
 def default_config() -> PlatformConfig:
     """内置默认配置，供未指定配置文件时装配使用。"""
 
+    receiver = ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 8.0, 22.0)
     return PlatformConfig(
         name="field-control",
         storage_root="var/state",
         heliostat=HeliostatLimits(0.6, 1.2, 0.9, 12.0, 450.0, 0.94),
         irradiance=IrradianceLimits(250.0, 1100.0, 30.0, 180.0),
         field=FieldLimits(320.0, 6.0, 12, 6.0),
-        receiver=ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 8.0, 22.0),
+        receiver=receiver,
+        flow_confirm=FlowConfirmLimits(
+            flow_min_kg_s=42.0,
+            ramp_window_s=10.0,
+            ramp_min_slope_kg_s2=0.8,
+            ramp_min_r2=0.9,
+            ramp_min_end_kg_s=30.0,
+            loaded_margin_kg_s=6.0,
+            loaded_hold_s=20.0,
+            loaded_slope_bound_kg_s2=0.25,
+            startup_dwell_s=2.0,
+            loaded_dwell_s=2.0,
+            sensor_fault_streak=5,
+            tick_gap_multiplier=2.0,
+            gate_max_retries=3,
+        ),
         salt=SaltLimits(18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4),
         steam=SteamLimits(12.0, 0.8, 6.0, 30.0, 1.0),
         wash=WashLimits(90.0, 26.0, 4.0, 9.0),
@@ -388,6 +465,20 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "flow_confirm_s": cfg.receiver.flow_confirm_s,
                 "valve_travel_pct_s": cfg.receiver.valve_travel_pct_s,
                 "ambient_c": cfg.receiver.ambient_c,
+            },
+            "flow_confirm": {
+                "ramp_window_s": cfg.flow_confirm.ramp_window_s,
+                "ramp_min_slope_kg_s2": cfg.flow_confirm.ramp_min_slope_kg_s2,
+                "ramp_min_r2": cfg.flow_confirm.ramp_min_r2,
+                "ramp_min_end_kg_s": cfg.flow_confirm.ramp_min_end_kg_s,
+                "loaded_margin_kg_s": cfg.flow_confirm.loaded_margin_kg_s,
+                "loaded_hold_s": cfg.flow_confirm.loaded_hold_s,
+                "loaded_slope_bound_kg_s2": cfg.flow_confirm.loaded_slope_bound_kg_s2,
+                "startup_dwell_s": cfg.flow_confirm.startup_dwell_s,
+                "loaded_dwell_s": cfg.flow_confirm.loaded_dwell_s,
+                "sensor_fault_streak": cfg.flow_confirm.sensor_fault_streak,
+                "tick_gap_multiplier": cfg.flow_confirm.tick_gap_multiplier,
+                "gate_max_retries": cfg.flow_confirm.gate_max_retries,
             },
             "salt": {
                 "cold_level_min_pct": cfg.salt.cold_level_min_pct,
